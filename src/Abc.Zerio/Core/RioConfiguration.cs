@@ -34,5 +34,10 @@ namespace Abc.Zerio.Core
         {
             return sizeInBytes / bufferLength;
         }
+
+        public override string ToString()
+        {
+            return $"{nameof(ReceivingBufferCount)}: {ReceivingBufferCount}, {nameof(SendingBufferCount)}: {SendingBufferCount}, {nameof(ReceivingBufferLength)}: {ReceivingBufferLength}, {nameof(SendingBufferLength)}: {SendingBufferLength}, {nameof(MaxOutstandingSends)}: {MaxOutstandingSends}, {nameof(MaxOutstandingReceives)}: {MaxOutstandingReceives}, {nameof(BufferAcquisitionTimeout)}: {BufferAcquisitionTimeout}, {nameof(MaxCompletionResults)}: {MaxCompletionResults}, {nameof(CompletionQueueSize)}: {CompletionQueueSize}";
+        }
     }
 }

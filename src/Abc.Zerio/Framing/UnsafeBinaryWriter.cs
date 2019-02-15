@@ -262,14 +262,10 @@ namespace Abc.Zerio.Framing
             fixed (byte* pBytes = buffer)
             {
                 var remainingCount = count;
-                while (true)
+                while (remainingCount > 0)
                 {
                     var byteCount = WriteBytesInCurrentBuffer(pBytes, index, remainingCount);
-
                     remainingCount -= byteCount;
-                    if (remainingCount == 0)
-                        return;
-
                     index += byteCount;
                 }
             }
@@ -389,11 +385,25 @@ namespace Abc.Zerio.Framing
 
         private int WriteBytesInCurrentBuffer(byte* pBytes, int index, int remainingCount)
         {
-            var availableData = (int)(_endOfBuffer - _bufferPosition);
+            var availableData = GetAvailableData();
+
             var bytesToWrite = Math.Min(remainingCount, availableData);
             Buffer.MemoryCopy(pBytes + index, _bufferPosition, bytesToWrite, bytesToWrite);
             _bufferPosition += bytesToWrite;
             return bytesToWrite;
+        }
+ 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetAvailableData()
+        {
+            var availableData = (int)(_endOfBuffer - _bufferPosition);
+            if (availableData == 0)
+            {
+                SwitchToNextBuffer();
+                availableData = (int)(_endOfBuffer - _bufferPosition);
+            }
+
+            return availableData;
         }
 
         public void Write(char ch)

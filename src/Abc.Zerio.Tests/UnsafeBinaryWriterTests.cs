@@ -256,7 +256,23 @@ namespace Abc.Zerio.Tests
 
             var bytes = new byte[bufferSegmentSize];
             new Random().NextBytes(bytes);
-            _writer.Write(bytes, 0, bytes.Length);
+            _writer.Write(bytes);
+            _writer.Write(_marker);
+
+            var read = _reader.ReadBytes(bytes.Length);
+
+            Assert.AreEqual(bytes, read);
+            Assert.AreEqual(_marker, _reader.ReadUInt32());
+        }
+
+        [Test]
+        public void should_write_bytes_that_are_bigger_than_segment()
+        {
+            CreateContext(Encoding.UTF8, 128);
+
+            var bytes = new byte[256];
+            new Random().NextBytes(bytes);
+            _writer.Write(bytes);
             _writer.Write(_marker);
 
             var read = _reader.ReadBytes(bytes.Length);
