@@ -10,25 +10,25 @@ namespace Abc.Zerio.Core
             const int oneMegabyte = allocationGranularity * 16;
 
             BufferAcquisitionTimeout = TimeSpan.FromSeconds(60);
-            ReceivingBufferLength = 4096 * 2;
-            SendingBufferLength = 128;
+            ReceivingBufferLength = 4096;
+            SendingBufferLength = 4096;
             ReceivingBufferCount = ComputeBufferCount(50 * oneMegabyte, ReceivingBufferLength);
-            SendingBufferCount = ComputeBufferCount(10 * oneMegabyte, SendingBufferLength);
+            SendingBufferCount = ComputeBufferCount(50 * oneMegabyte, SendingBufferLength);
             MaxOutstandingSends = SendingBufferCount;
             MaxOutstandingReceives = ReceivingBufferCount;
             CompletionQueueSize = MaxOutstandingSends + MaxOutstandingReceives;
             MaxCompletionResults = 2048;
         }
 
-        public int ReceivingBufferCount { get; set; }
-        public int SendingBufferCount { get; set; }
-        public int ReceivingBufferLength { get; set; }
-        public int SendingBufferLength { get; set; }
-        public int MaxOutstandingSends { get; set; }
-        public int MaxOutstandingReceives { get; set; }
+        public int ReceivingBufferCount { get; }
+        public int SendingBufferCount { get; }
+        public int ReceivingBufferLength { get; }
+        public int SendingBufferLength { get; }
+        public int MaxOutstandingSends { get; }
+        public int MaxOutstandingReceives { get; }
         public TimeSpan BufferAcquisitionTimeout { get; set; }
-        public int MaxCompletionResults { get; set; }
-        public int CompletionQueueSize { get; set; }
+        public int MaxCompletionResults { get; }
+        public int CompletionQueueSize { get; protected set; }
 
         private static int ComputeBufferCount(int sizeInBytes, int bufferLength)
         {

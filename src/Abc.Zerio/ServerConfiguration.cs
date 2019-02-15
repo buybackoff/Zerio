@@ -10,15 +10,13 @@ namespace Abc.Zerio
             WorkerCount = 1;
             SessionCount = 5;
 
-            SendingBufferCount *= 10;
-
             var maxSessionOutstandingRequests = MaxOutstandingSends + MaxOutstandingReceives;
             var sessionPerWorker = SessionCount / WorkerCount;
             CompletionQueueSize = sessionPerWorker * maxSessionOutstandingRequests;
         }
 
-        public int ListeningPort { get; set; }
-        public int WorkerCount { get; set; }
-        public int SessionCount { get; set; }
+        public int ListeningPort { get; }
+        public int WorkerCount { get; }
+        public int SessionCount { get; }
     }
 }

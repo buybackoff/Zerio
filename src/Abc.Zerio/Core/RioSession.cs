@@ -58,7 +58,7 @@ namespace Abc.Zerio.Core
 
         public void Open(IntPtr socket)
         {
-            Close();
+            Close("opening session");
 
             _socket = socket;
 
@@ -68,8 +68,9 @@ namespace Abc.Zerio.Core
             _requestQueue = RioRequestQueue.Create(Id, socket, _sendingCompletionQueue, maxOutstandingSends, _receivingCompletionQueue, maxOutstandingReceives);
         }
 
-        public void Close()
+        public void Close(string reason)
         {
+            Console.WriteLine($"Closing session because {reason}");
             if (Interlocked.Exchange(ref _requestQueue, null) == null)
                 return;
 
@@ -158,7 +159,7 @@ namespace Abc.Zerio.Core
             if (buffer.DataLength != bytesTransferred)
             {
                 // this is an abnormal incomplete send; we disconnect the session
-                Close();
+                Close($"send completed but buffer data length ({buffer.DataLength}) is not equal to bytes transferred ({bytesTransferred})");
                 return;
             }
 
@@ -206,7 +207,7 @@ namespace Abc.Zerio.Core
         {
             if (bytesTransferred == 0)
             {
-                Close();
+                Close("request completed");
                 return;
             }
 
@@ -237,7 +238,7 @@ namespace Abc.Zerio.Core
 
         protected virtual void Dispose(bool disposing)
         {
-            Close();
+            Close("disposing");
 
             if (disposing)
             {

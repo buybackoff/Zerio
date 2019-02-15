@@ -10,7 +10,11 @@ namespace Abc.Zerio.Buffers
         public readonly byte* Data;
         public readonly int Length;
 
-        public int DataLength { get { return BufferDescriptor->Length; } set { BufferDescriptor->Length = value; } }
+        public int DataLength
+        {
+            get => BufferDescriptor->Length;
+            set => BufferDescriptor->Length = value;
+        }
 
         public RioBuffer(int id, byte* dataPointer, RIO_BUF* bufferDescriptor, int length)
         {

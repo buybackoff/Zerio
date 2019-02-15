@@ -2,7 +2,7 @@
 {
     public enum RioRequestType
     {
-        Send,
-        Receive
+        Send = 1,
+        Receive = 2
     }
 }

@@ -16,7 +16,7 @@ namespace Abc.Zerio.Ping
     static class Program
     {
         const double _microsecDivisor = TimeSpan.TicksPerMillisecond / 1000.0;
-        private const int _warmupIterations = 100;
+        private const int _warmupIterations = 0;
         private const int _sendPort = 12345;
 
         static void Main(string[] args)
@@ -56,7 +56,7 @@ namespace Abc.Zerio.Ping
 
             var finished = new ManualResetEvent(false);
             var pongsReceived = 0;
-            client.Subscribe<Pong>(pong =>
+            var token = client.Subscribe<Pong>(pong =>
             {
                 var ticks = Stopwatch.GetTimestamp() - pong.PingTimestamp;
                 if (pongsReceived > _warmupIterations)
@@ -96,6 +96,7 @@ namespace Abc.Zerio.Ping
             finished.WaitOne(TimeSpan.FromMinutes(1));
             Console.WriteLine("All replies received");
 
+            token.Dispose();
             client.Dispose();
 
             histogram.OutputPercentileDistribution(Console.Out, percentileTicksPerHalfDistance: 2, outputValueUnitScalingRatio: _microsecDivisor);
@@ -106,8 +107,8 @@ namespace Abc.Zerio.Ping
             var serverConfiguration = new ServerConfiguration(_sendPort);
             SetupConfiguration(serverConfiguration);
             var server = new RioServer(serverConfiguration, new SerializationEngine(serializationRegistries.Server));
-            server.ClientConnected += c => Console.WriteLine("Client connected");
-            server.ClientDisconnected += c => Console.WriteLine("Client disconnected");
+            server.ClientConnected += c => Console.WriteLine($"Client connected #{c}");
+            server.ClientDisconnected += c => Console.WriteLine($"Client disconnected #{c}");
 
             var token = server.Subscribe<Ping>((clientId, ping) =>
             {
@@ -127,12 +128,12 @@ namespace Abc.Zerio.Ping
 
         private static void SetupConfiguration(RioConfiguration configuration)
         {
-            var bufferLength = 4096;
+            /*var bufferLength = 4096;
             var bufferCount = 2000;
             configuration.ReceivingBufferLength = bufferLength;
             configuration.ReceivingBufferCount = bufferCount;
             configuration.SendingBufferLength = bufferLength;
-            configuration.SendingBufferCount = bufferCount;
+            configuration.SendingBufferCount = bufferCount;*/
         }
 
         private static void Wait(int intervalInMilliseconds)

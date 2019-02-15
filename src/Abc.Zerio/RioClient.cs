@@ -53,7 +53,7 @@ namespace Abc.Zerio
         {
             _completionWorker.Stop();
 
-            _session.Close();
+            _session.Close("disconnect");
         }
 
         public IDisposable Subscribe<T>(IMessageHandler handler)

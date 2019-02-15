@@ -34,7 +34,7 @@ namespace Abc.Zerio.Server
                 server.ClientConnected += OnClientConnected;
                 server.ClientDisconnected += OnClientDisconnected;
 
-                using (server.Subscribe<PlaceOrderMessage>(OnMessageReceived))
+                using (server.Subscribe<PlaceOrderMessage>((i, message) => OnMessageReceived(i, message, server)))
                 {
                     server.Start();
 
@@ -54,7 +54,7 @@ namespace Abc.Zerio.Server
             Console.WriteLine($"Client {clientId} connected.");
         }
 
-        private static void OnMessageReceived(int clientId, PlaceOrderMessage placeOrderMessage)
+        private static void OnMessageReceived(int clientId, PlaceOrderMessage placeOrderMessage, RioServer server)
         {
             if (_receivedMessageCount == 0)
                 _sw.Start();
@@ -65,6 +65,8 @@ namespace Abc.Zerio.Server
                 Console.WriteLine($"{_receivedMessageCount:N0} in {_sw.Elapsed} ({stepcount / _sw.Elapsed.TotalSeconds:N0}m/s)");
                 _sw.Restart();
             }
+
+            server.Send(clientId, new OrderAckMessage { Id = placeOrderMessage.Id });
         }
 
         private static RioServer CreateServer(IServerConfiguration configuration)
