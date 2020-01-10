@@ -145,7 +145,7 @@ namespace Abc.Zerio.Alt
 
         private void InitClientSession(IntPtr acceptSocket)
         {
-            var clientSession = new Session(acceptSocket, _pool, _poller, OnMessageReceived, OnClientSessionClosed);
+            var clientSession = new Session(true, acceptSocket, _pool, _poller, OnMessageReceived, OnClientSessionClosed);
             clientSession.HandshakeSignal.WaitOne(); // TODO timeout
             _sessions.TryAdd(clientSession.PeerId, clientSession);
             ClientConnected?.Invoke(clientSession.PeerId);

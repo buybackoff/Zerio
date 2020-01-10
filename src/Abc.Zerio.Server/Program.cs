@@ -23,11 +23,11 @@ namespace Abc.Zerio.Server
             Console.WriteLine("SERVER...");
 
             using var rioServer = new ZerioServer(RIO_PORT);
-            //using var tcpServer = new TcpFeedServer(TCP_PORT);
+            using var tcpServer = new TcpFeedServer(TCP_PORT);
             using var altServer = new Alt.ZerioServer(ALT_PORT);
 
-            // StartServer(rioServer);
-            //StartServer(tcpServer);
+            StartServer(rioServer);
+            StartServer(tcpServer);
             StartServer(altServer);
 
             const bool alwaysPrintStats = false;
@@ -70,8 +70,8 @@ namespace Abc.Zerio.Server
 
             cts.Cancel();
             monitoringThread.Join();
-            //rioServer.Stop();
-            //tcpServer.Stop();
+            rioServer.Stop();
+            tcpServer.Stop();
             altServer.Stop();
         }
 

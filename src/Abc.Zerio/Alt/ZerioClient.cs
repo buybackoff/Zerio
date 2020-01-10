@@ -40,9 +40,7 @@ namespace Abc.Zerio.Alt
 
         public void Send(ReadOnlySpan<byte> message)
         {
-            var claim = _session.Claim();
-            message.CopyTo(claim.Span);
-            claim.Commit(message.Length, false);
+            _session.Send(message);
         }
 
         private void CheckOnlyStartedOnce()
@@ -61,9 +59,9 @@ namespace Abc.Zerio.Alt
             _socket = CreateSocket();
             Connect(_socket, _serverEndpoint);
 
-            _session = new Session( _socket, _pool, _poller, (_, bytes) => { MessageReceived?.Invoke(bytes); }, OnSessionClosed);
+            _session = new Session(false, _socket, _pool, _poller, (_, bytes) => { MessageReceived?.Invoke(bytes); }, OnSessionClosed);
             var peerIdBytes = Encoding.ASCII.GetBytes(peerId);
-            Send(peerIdBytes.AsSpan());
+            _session.StreamSend(peerIdBytes.AsSpan());
             _session.HandshakeSignal.WaitOne();
 
             IsConnected = true;

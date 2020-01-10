@@ -1,6 +1,8 @@
 ﻿using Abc.Zerio.Alt.Buffers;
 using Abc.Zerio.Interop;
 using System;
+using System.Diagnostics;
+using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
 using System.Runtime.ConstrainedExecution;
 using System.Runtime.InteropServices;
@@ -20,6 +22,7 @@ namespace Abc.Zerio.Alt
         // private readonly RioBufferPool _globalPool;
 
         private readonly Poller _poller;
+        private volatile bool _shouldPollReceive;
 
         private CancellationToken _ct;
 
@@ -33,20 +36,34 @@ namespace Abc.Zerio.Alt
 
         private readonly SemaphoreSlimRhsPad _sendSemaphore;
 
-        private readonly MessageFramer _messageFramer;
-
         public readonly AutoResetEvent HandshakeSignal = new AutoResetEvent(false);
         public string PeerId { get; private set; }
 
-        private bool _isWaitingForHandshake = true;
+        private volatile bool _isWaitingForHandshake = true;
+        private readonly bool _isServer;
+        private readonly IntPtr _socketHandle;
         private readonly SessionMessageReceivedDelegate _messageReceived;
         private readonly Action<Session> _closed;
         private readonly byte* _resultsPtr;
         private readonly RIO_RESULT* _sendResults;
         private readonly RIO_RESULT* _receiveResults;
+        private int _receiveResultsCount;
+        private int _receiveResultsProcessed;
 
-        public Session(IntPtr socket, RioBufferPool pool, Poller poller, SessionMessageReceivedDelegate messageReceived, Action<Session> closed)
+        private byte[] _sendBuffer = new byte[64 * 1024];
+        private byte[] _receiveBuffer = new byte[64 * 1024];
+        private byte[] _localRemainingRead;
+        private int _localRemainingLength;
+        private int _localRemainingOffset;
+
+        private int _receivedBytes;
+        private WebSocket _ws;
+
+        public Session(bool isServer, IntPtr socketHandle, RioBufferPool pool, Poller poller, SessionMessageReceivedDelegate messageReceived, Action<Session> closed)
         {
+            _isServer = isServer;
+            _socketHandle = socketHandle;
+
             var options = pool.Options;
             _ct = pool.CancellationToken;
             // _globalPool = pool;
@@ -54,6 +71,9 @@ namespace Abc.Zerio.Alt
             _localSendPool = new BoundedLocalPool<RioSegment>(options.SendSegmentCount);
             _localSendBuffer = new RegisteredBuffer(options.SendSegmentCount, options.SendSegmentSize);
             _localReceiveBuffer = new RegisteredBuffer(options.ReceiveSegmentCount, options.ReceiveSegmentSize);
+            _localRemainingRead = new byte[_localReceiveBuffer.SegmentLength];
+            _localRemainingLength = 0;
+            _localRemainingOffset = 0;
 
             for (int i = 0; i < options.SendSegmentCount; i++)
             {
@@ -68,12 +88,15 @@ namespace Abc.Zerio.Alt
             _resultsPtr = (byte*)Marshal.AllocHGlobal(Unsafe.SizeOf<RIO_RESULT>() * (_sendPollCount + _receivePollCount) + Padding.SafeCacheLine * 3);
             //  128 ... send_results ... 128 ... receive_results ... 128
             _sendResults = (RIO_RESULT*)(_resultsPtr + Padding.SafeCacheLine);
+
             _receiveResults = (RIO_RESULT*)((byte*)_sendResults + +(uint)Unsafe.SizeOf<RIO_RESULT>() * _sendPollCount + Padding.SafeCacheLine);
+            _receiveResultsCount = 0;
+            _receiveResultsProcessed = 0;
 
             _scq = WinSock.Extensions.CreateCompletionQueue((uint)options.SendSegmentCount);
             _rcq = WinSock.Extensions.CreateCompletionQueue((uint)options.ReceiveSegmentCount);
 
-            _rq = WinSock.Extensions.CreateRequestQueue(socket,
+            _rq = WinSock.Extensions.CreateRequestQueue(socketHandle,
                                                         (uint)options.ReceiveSegmentCount,
                                                         1,
                                                         (uint)options.SendSegmentCount,
@@ -90,37 +113,138 @@ namespace Abc.Zerio.Alt
                 _sendReceive.Receive(segment);
             }
 
-            _messageFramer = new MessageFramer(64 * 1024);
-            _messageFramer.MessageFramed += OnMessageFramed;
-
             _poller = poller;
+            _shouldPollReceive = true;
+
+            var stream = new SessionStream(this);
+            _ws = WebSocket.CreateFromStream(stream, isServer, "zerio", TimeSpan.FromSeconds(30));
             // this line at the very end after session is ready
             _poller.AddSession(this);
         }
 
-        private void OnMessageFramed(ReadOnlySpan<byte> message)
+        private void OnMessageReceived(ReadOnlySpan<byte> message)
         {
-            if (_isWaitingForHandshake)
+            _messageReceived?.Invoke(PeerId, message);
+        }
+
+        public int StreamReceive(Span<byte> buffer)
+        {
+            var length = buffer.Length;
+            var consumed = 0;
+
+            if (_localRemainingLength > 0)
             {
-                PeerId = Encoding.ASCII.GetString(message);
-                _isWaitingForHandshake = false;
-                HandshakeSignal.Set();
-                Send(message);
-                return;
+                var localSpan = _localRemainingRead.AsSpan(_localRemainingOffset, _localRemainingLength - _localRemainingOffset);
+
+                if (localSpan.Length >= buffer.Length)
+                {
+                    localSpan.Slice(buffer.Length).CopyTo(buffer);
+                    _localRemainingOffset += buffer.Length;
+                    if (_localRemainingOffset >= _localRemainingLength)
+                    {
+                        _localRemainingOffset = _localRemainingLength = 0;
+                    }
+
+                    return buffer.Length;
+                }
+
+                localSpan.CopyTo(buffer);
+                consumed += localSpan.Length;
+                _localRemainingOffset = _localRemainingLength = 0;
             }
 
-            _messageReceived?.Invoke(PeerId, message);
+            if (_receiveResultsProcessed >= _receiveResultsCount)
+            {
+                throw new InvalidOperationException("Should not call Receive until results are available");
+            }
+
+            // TODO still assumes that message size < segment size
+
+            while (consumed < length)
+            {
+                var bytesToConsumeFromSegment = Math.Min(buffer.Length - consumed, _localReceiveBuffer.SegmentLength);
+
+                var result = _receiveResults[_receiveResultsProcessed];
+                var id = new BufferSegmentId(result.RequestCorrelation);
+                var segment = _localReceiveBuffer[id.SegmentId];
+
+                var copyLength = Math.Min((int)result.BytesTransferred, bytesToConsumeFromSegment);
+                var span = segment.Span.Slice(0, copyLength);
+                span.CopyTo(buffer.Slice(consumed));
+                consumed += span.Length;
+
+                var remainingTransferredBytes = (int)(result.BytesTransferred - copyLength);
+                if (remainingTransferredBytes > 0)
+                {
+                    _localRemainingLength = remainingTransferredBytes;
+                    _localRemainingOffset = 0;
+                    segment.Span.Slice(copyLength, remainingTransferredBytes).CopyTo(_localRemainingRead);
+                    Debug.Assert(consumed == length);
+                }
+
+                _sendReceive.Receive(segment);
+                _receiveResultsProcessed++;
+
+                if (_receiveResultsProcessed == _receiveResultsCount)
+                {
+                    _receiveResultsProcessed = _receiveResultsCount = 0;
+                    if (!_isWaitingForHandshake)
+                    {
+                        var availableReceives = DoReceive();
+                        if (availableReceives == 0)
+                        {
+                            return consumed;
+                        }
+                        else
+                        {
+                            Console.WriteLine("xxx");
+                        }
+                    }
+                    else
+                    {
+                        return consumed;
+                    }
+                }
+            }
+
+            return consumed;
+
+            //for (int i = _receiveResultsProcessed; i < _receiveResultsCount; i++)
+            //{
+            //    var result = _receiveResults[i];
+            //    var id = new BufferSegmentId(result.RequestCorrelation);
+            //    var segment = _localReceiveBuffer[id.SegmentId];
+            //    var span = segment.Span.Slice(0, (int)result.BytesTransferred);
+            //    OnSegmentReceived(span);
+            //    _sendReceive.Receive(segment);
+            //}
+
+            //_receiveResultsCount = 0;
+            //_receiveResultsProcessed = 0;
         }
 
         public void Send(ReadOnlySpan<byte> message)
         {
-            var claim = Claim();
-            message.CopyTo(claim.Span);
-            claim.Commit(message.Length, false);
+            message.CopyTo(_sendBuffer);
+            // implemented as sync
+            _ws.SendAsync(_sendBuffer.AsMemory().Slice(0, message.Length), WebSocketMessageType.Binary, true, _ct);
+        }
+
+        public void StreamSend(ReadOnlySpan<byte> message)
+        {
+            var consumed = 0;
+            while (consumed < message.Length)
+            {
+                var segment = Claim();
+                var copyLength = Math.Min(message.Length - consumed, segment.Length);
+                message.Slice(consumed, copyLength).CopyTo(segment.Span);
+                Commit(segment, copyLength);
+                consumed += copyLength;
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Claim Claim()
+        public RioSegment Claim()
         {
             bool isPollerThread = Thread.CurrentThread.ManagedThreadId == _poller.ThreadId;
             var count = 0;
@@ -146,7 +270,7 @@ namespace Abc.Zerio.Alt
                         ThrowCannotGetSegmentAfterSemaphoreEnter();
                     }
 
-                    return new Claim(segment, this);
+                    return segment;
                 }
 
                 if (isPollerThread
@@ -163,7 +287,7 @@ namespace Abc.Zerio.Alt
                     {
                         var id = new BufferSegmentId(result.RequestCorrelation);
                         segment = _localSendBuffer[id.SegmentId]; //id.PoolId == 0 ? _localSendBuffer[id.SegmentId] : _globalPool[id];
-                        return new Claim(segment, this);
+                        return segment;
                     }
                 }
 
@@ -179,8 +303,9 @@ namespace Abc.Zerio.Alt
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Commit(RioSegment segment)
+        public void Commit(RioSegment segment, int length)
         {
+            segment.RioBuf.Length = length;
             _sendReceive.Send(segment);
         }
 
@@ -190,7 +315,7 @@ namespace Abc.Zerio.Alt
         /// <returns></returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining
 #if NETCOREAPP3_0
-            | MethodImplOptions.AggressiveOptimization
+                    | MethodImplOptions.AggressiveOptimization
 #endif
         )]
         public int Poll()
@@ -209,22 +334,79 @@ namespace Abc.Zerio.Alt
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int PollReceive()
         {
-            var resultCount = WinSock.Extensions.DequeueCompletion(_rcq, _receiveResults, _receivePollCount);
+            if (!_shouldPollReceive && !_isWaitingForHandshake)
+                return 0;
 
-            if (resultCount == WinSock.Consts.RIO_CORRUPT_CQ)
-                WinSock.ThrowLastWsaError();
+            var results = DoReceive();
 
-            for (int i = 0; i < resultCount; i++)
+            if (results == 0)
+                return 0;
+
+            if (_isWaitingForHandshake)
             {
-                var result = _receiveResults[i];
-                var id = new BufferSegmentId(result.RequestCorrelation);
-                var segment = _localReceiveBuffer[id.SegmentId];
-                var span = segment.Span.Slice(0, (int)result.BytesTransferred);
-                OnSegmentReceived(span);
-                _sendReceive.Receive(segment);
+                _isWaitingForHandshake = false;
+                Span<byte> span = stackalloc byte[128];
+                var len = StreamReceive(span);
+                var message = span.Slice(0, len);
+                PeerId = Encoding.ASCII.GetString(message);
+                
+                HandshakeSignal.Set();
+                if(_isServer)
+                    StreamSend(message);
+
+                Debug.Assert(_receiveResultsCount == 0);
+                Debug.Assert(_receiveResultsProcessed == 0);
+
+                return 1;
             }
 
-            return (int)resultCount;
+            // this is implemented as sync call: SessionStream.ReceiveAsync -> Session.Receive
+            var receiveResult = _ws.ReceiveAsync(_receiveBuffer.AsMemory(_receivedBytes, _receiveBuffer.Length - _receivedBytes), _ct).Result;
+
+            if (receiveResult.MessageType == WebSocketMessageType.Close)
+                _shouldPollReceive = false;
+
+            _receivedBytes += receiveResult.Count;
+
+            if (receiveResult.EndOfMessage)
+            {
+                OnMessageReceived(_receiveBuffer.AsSpan(0, _receivedBytes));
+                _receivedBytes = 0;
+            }
+
+            return receiveResult.Count;
+
+            //var resultCount = DoReceive();
+
+            //for (int i = _receiveResultsProcessed; i < _receiveResultsCount; i++)
+            //{
+            //    var result = _receiveResults[i];
+            //    var id = new BufferSegmentId(result.RequestCorrelation);
+            //    var segment = _localReceiveBuffer[id.SegmentId];
+            //    var span = segment.Span.Slice(0, (int)result.BytesTransferred);
+            //    OnSegmentReceived(span);
+            //    _sendReceive.Receive(segment);
+            //}
+
+            //_receiveResultsCount = 0;
+            //_receiveResultsProcessed = 0;
+
+            //return (int)resultCount;
+        }
+
+        /// <summary>
+        /// Dequeue receive results up to <see cref="_receivePollCount"/>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int DoReceive()
+        {
+            var resultCount = WinSock.Extensions.DequeueCompletion(_rcq,
+                                                                   _receiveResults + _receiveResultsCount,
+                                                                   _isWaitingForHandshake ? 1 : (uint)(_receivePollCount - _receiveResultsCount));
+            if (resultCount == WinSock.Consts.RIO_CORRUPT_CQ)
+                WinSock.ThrowLastWsaError();
+            _receiveResultsCount += (int)resultCount;
+            return _receiveResultsCount - _receiveResultsProcessed;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -263,10 +445,10 @@ namespace Abc.Zerio.Alt
             return (int)resultCount;
         }
 
-        private void OnSegmentReceived(Span<byte> bytes)
-        {
-            _messageFramer.SubmitBytes(bytes);
-        }
+        //private void OnSegmentReceived(Span<byte> bytes)
+        //{
+        //    _messageFramer.SubmitBytes(bytes);
+        //}
 
         ~Session()
         {
@@ -278,6 +460,7 @@ namespace Abc.Zerio.Alt
             Marshal.FreeHGlobal((IntPtr)_resultsPtr);
             WinSock.Extensions.CloseCompletionQueue(_rcq);
             WinSock.Extensions.CloseCompletionQueue(_scq);
+            WinSock.closesocket(_socketHandle);
         }
 
         private void Dispose(bool disposing)
@@ -307,7 +490,7 @@ namespace Abc.Zerio.Alt
 
         private class RioSendReceive
         {
-             // TODO SpinLock with padding
+            // TODO SpinLock with padding
             private readonly IntPtr _rq;
 
             public RioSendReceive(IntPtr rq)
@@ -344,7 +527,8 @@ namespace Abc.Zerio.Alt
             private Padding _padding;
 #pragma warning restore 169
 
-            public SemaphoreSlimRhsPad(int initialCount, int maxCount) : base(initialCount, maxCount)
+            public SemaphoreSlimRhsPad(int initialCount, int maxCount)
+                : base(initialCount, maxCount)
             {
             }
         }
